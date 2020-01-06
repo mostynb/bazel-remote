@@ -56,6 +56,11 @@ container_image(
         "/app/bazel-remote-base.binary",
         "--port=8080",
         "--dir=/data",
+
+        # This defaults to 127.0.0.1 which is inaccessible outside the container.
+        "--profile_host=",
+        # This is disabled by default.
+        "--profile_port=6060",
     ],
     ports = ["8080"],
     visibility = ["//visibility:public"],
