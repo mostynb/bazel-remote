@@ -2,6 +2,10 @@ package disk
 
 import (
 	"container/list"
+	"fmt"
+	"net/http"
+	"os"
+	"path"
 )
 
 type SizedItem interface {
@@ -23,6 +27,8 @@ type SizedLRU interface {
 	Len() int
 	CurrentSize() int64
 	MaxSize() int64
+
+	DebugPageHandler(w http.ResponseWriter, dir string)
 }
 
 type sizedLRU struct {
@@ -122,5 +128,46 @@ func (c *sizedLRU) removeElement(e *list.Element) {
 
 	if c.onEvict != nil {
 		c.onEvict(kv.key, kv.value)
+	}
+}
+
+func (c *sizedLRU) DebugPageHandler(w http.ResponseWriter, dir string) {
+	fmt.Fprintf(w, "expected CurrentSize: %d\n", c.currentSize)
+	fmt.Fprintf(w, "expected NumItems: %d\n", len(c.cache))
+
+	foundBadItems := false
+
+	runningTotal := int64(0)
+	for e := c.ll.Front(); e != nil; e = e.Next() {
+		v := e.Value.(*entry)
+		itemSize := v.value.Size()
+		runningTotal += itemSize
+
+		f := path.Join(dir, v.key.(string))
+		fi, err := os.Stat(f)
+		if err != nil {
+			fmt.Fprintf(w, "Error: unable to stat %s: %v\n",
+				f, err)
+			foundBadItems = true
+			continue
+		}
+
+		if fi.Size() != itemSize {
+			fmt.Fprintf(w, "ITEM: %v EXPECTED: %d ONDISK: %d\n",
+				v.key, itemSize, fi.Size())
+			foundBadItems = true
+			continue
+		}
+	}
+
+	if runningTotal == c.currentSize {
+		fmt.Fprintf(w, "Actual CurrentSize was correct.\n")
+	} else {
+		fmt.Fprintf(w, "Actual CurrentSize: %d Expected: %d\n",
+			runningTotal, c.currentSize)
+	}
+
+	if !foundBadItems {
+		fmt.Fprintf(w, "No bad items found.\n")
 	}
 }

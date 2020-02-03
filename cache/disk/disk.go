@@ -569,3 +569,13 @@ func (c *DiskCache) GetValidatedActionResult(hash string) (*pb.ActionResult, []b
 
 	return result, data, nil
 }
+
+func (c *DiskCache) DebugPageHandler(w http.ResponseWriter, r *http.Request) {
+	c.mu.Lock()
+	defer func() {
+		c.mu.Unlock()
+		r.Body.Close()
+	}()
+
+	c.lru.DebugPageHandler(w, c.dir)
+}

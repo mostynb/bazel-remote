@@ -250,6 +250,7 @@ func main() {
 		h := server.NewHTTPCache(diskCache, accessLogger, errorLogger, validateAC, gitCommit)
 		mux.Handle("/metrics", promhttp.Handler())
 		mux.HandleFunc("/status", h.StatusPageHandler)
+		mux.HandleFunc("/debug", diskCache.DebugPageHandler)
 
 		cacheHandler := h.CacheHandler
 		if c.HtpasswdFile != "" {
