@@ -197,6 +197,10 @@ func main() {
 			DefaultText: "false, ie enable ActionCache dependency checks",
 			EnvVars:     []string{"BAZEL_REMOTE_DISABLE_GRPS_AC_DEPS_CHECK"},
 		},
+		&cli.BoolFlag{
+			Name:  "experimental_fetch_api",
+			Usage: "Whether to enable the experimental fetch api implementation.",
+		},
 	}
 
 	app.Action = func(ctx *cli.Context) error {
@@ -362,6 +366,7 @@ func main() {
 
 				err3 := server.ListenAndServeGRPC(addr, opts,
 					validateAC,
+					ctx.Bool("experimental_fetch_api"),
 					diskCache, accessLogger, errorLogger)
 				if err3 != nil {
 					log.Fatal(err3)
