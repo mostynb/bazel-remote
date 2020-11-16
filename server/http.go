@@ -203,7 +203,7 @@ func (h *httpCache) CacheHandler(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 
-		rdr, sizeBytes, err := h.cache.Get(kind, hash, -1)
+		rdr, sizeBytes, err := h.cache.Get(kind, hash, -1, 0)
 		if err != nil {
 			if e, ok := err.(*cache.Error); ok {
 				http.Error(w, e.Error(), e.Code)

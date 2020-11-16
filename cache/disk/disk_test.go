@@ -61,7 +61,7 @@ func TestCacheBasics(t *testing.T) {
 	data, hash := testutils.RandomDataAndHash(itemSize)
 
 	// Non-existing item.
-	rdr, _, err := testCache.Get(cache.CAS, hash, itemSize)
+	rdr, _, err := testCache.Get(cache.CAS, hash, itemSize, 0)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -77,7 +77,7 @@ func TestCacheBasics(t *testing.T) {
 	}
 
 	// Get the item back.
-	rdr, sizeBytes, err := testCache.Get(cache.CAS, hash, itemSize)
+	rdr, sizeBytes, err := testCache.Get(cache.CAS, hash, itemSize, 0)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -136,7 +136,7 @@ func TestCacheGetContainsWrongSize(t *testing.T) {
 		t.Error("Expected not found, due to size being different")
 	}
 
-	rdr, _, _ = testCache.Get(cache.CAS, contentsHash, contentsLength+1)
+	rdr, _, _ = testCache.Get(cache.CAS, contentsHash, contentsLength+1, 0)
 	if rdr != nil {
 		t.Error("Expected not found, due to size being different")
 	}
@@ -146,7 +146,7 @@ func TestCacheGetContainsWrongSize(t *testing.T) {
 		t.Error("Expected found, when unknown size")
 	}
 
-	rdr, _, _ = testCache.Get(cache.CAS, contentsHash, -1)
+	rdr, _, _ = testCache.Get(cache.CAS, contentsHash, -1, 0)
 	if rdr == nil {
 		t.Error("Expected found, when unknown size")
 	}
@@ -176,7 +176,7 @@ func TestCacheGetContainsWrongSizeWithProxy(t *testing.T) {
 		t.Fatal("Expected not found, due to size being different")
 	}
 
-	rdr, _, _ = testCache.Get(cache.CAS, contentsHash, contentsLength+1)
+	rdr, _, _ = testCache.Get(cache.CAS, contentsHash, contentsLength+1, 0)
 	if rdr != nil {
 		t.Fatal("Expected not found, due to size being different")
 	}
@@ -191,7 +191,7 @@ func TestCacheGetContainsWrongSizeWithProxy(t *testing.T) {
 		t.Fatal("Expected found, when unknown size")
 	}
 
-	rdr, _, _ = testCache.Get(cache.CAS, contentsHash, -1)
+	rdr, _, _ = testCache.Get(cache.CAS, contentsHash, -1, 0)
 	if rdr == nil {
 		t.Fatal("Expected found, when unknown size")
 	}
@@ -278,7 +278,7 @@ func putGetCompareBytes(kind cache.EntryKind, hash string, data []byte, testCach
 		return err
 	}
 
-	rdr, sizeBytes, err := testCache.Get(kind, hash, int64(len(data)))
+	rdr, sizeBytes, err := testCache.Get(kind, hash, int64(len(data)), 0)
 	if err != nil {
 		return err
 	}
@@ -792,7 +792,7 @@ func TestHttpProxyBackend(t *testing.T) {
 	blob, casHash := testutils.RandomDataAndHash(blobSize)
 
 	// Non-existing item
-	r, _, err := testCache.Get(cache.CAS, casHash, blobSize)
+	r, _, err := testCache.Get(cache.CAS, casHash, blobSize, 0)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -834,7 +834,7 @@ func TestHttpProxyBackend(t *testing.T) {
 		t.Fatalf("Expected the cache not to contain %s", casHash)
 	}
 
-	r, _, err = testCache.Get(cache.CAS, casHash, blobSize)
+	r, _, err = testCache.Get(cache.CAS, casHash, blobSize, 0)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -851,7 +851,7 @@ func TestHttpProxyBackend(t *testing.T) {
 			casHash)
 	}
 
-	r, fetchedSize, err := testCache.Get(cache.CAS, casHash, blobSize)
+	r, fetchedSize, err := testCache.Get(cache.CAS, casHash, blobSize, 0)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -1046,5 +1046,65 @@ func TestGetValidatedActionResult(t *testing.T) {
 
 	if !proto.Equal(rAR, &ar) {
 		t.Fatal("Returned ActionResult proto does not match")
+	}
+}
+
+func TestGetWithOffset(t *testing.T) {
+	cacheDir := testutils.TempDir(t)
+	defer os.RemoveAll(cacheDir)
+
+	const blobSize = 2048 + 256
+
+	testCache, err := New(cacheDir, blobSize*2, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	data, hash := testutils.RandomDataAndHash(blobSize)
+
+	err = testCache.Put(cache.CAS, hash, blobSize,
+		ioutil.NopCloser(bytes.NewReader(data)))
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	rc, foundSize, err := testCache.Get(cache.CAS, hash, int64(len(data)), 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if foundSize != int64(len(data)) {
+		t.Fatalf("Got back a blob with size %d, original blob had size %d",
+			foundSize, int64(len(data)))
+	}
+
+	// Read back the full blob, confirm the test state is OK.
+	foundData, err := ioutil.ReadAll(rc)
+	if err != nil {
+		t.Fatal(err)
+	}
+	rc.Close()
+	if !bytes.Equal(data, foundData) {
+		t.Fatal("Got back different data")
+	}
+
+	// Now try some partial reads.
+	for _, offset := range []int64{42, 1023, 1024, 1025, 2048, 2303} {
+		rc, foundSize, err = testCache.Get(cache.CAS, hash, int64(len(data)), offset)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if foundSize != int64(len(data)) {
+			t.Fatalf("Got back a blob with size %d, original blob had size %d",
+				foundSize, int64(len(data)))
+		}
+
+		foundData, err = ioutil.ReadAll(rc)
+		if err != nil {
+			t.Fatal(err)
+		}
+		rc.Close()
+		if !bytes.Equal(data[offset:], foundData) {
+			t.Fatal("Got back different data", len(data[offset:]), len(foundData))
+		}
 	}
 }

@@ -3,6 +3,7 @@ package disk
 import (
 	"bytes"
 	"crypto/sha256"
+	"errors"
 	"fmt"
 	"io"
 	"io/ioutil"
@@ -41,6 +42,8 @@ var (
 )
 
 var tfc = tempfile.NewCreator()
+
+var emptyZstdBlob = []byte{40, 181, 47, 253, 32, 0, 1, 0, 0}
 
 // lruItem is the type of the values stored in SizedLRU to keep track of items.
 type lruItem struct {
@@ -553,7 +556,9 @@ func (c *Cache) commit(key string, tempfile string, finalPath string, reservedSi
 // Return a non-nil io.ReadCloser and non-negative size if the item is available
 // locally, and a boolean that indicates if the item is not available locally
 // but that we can try the proxy backend.
-func (c *Cache) availableOrTryProxy(key string, size int64, blobPath string, kind cache.EntryKind) (rc io.ReadCloser, foundSize int64, tryProxy bool, err error) {
+//
+// This function assumes that only CAS blobs are requested in zstd form.
+func (c *Cache) availableOrTryProxy(key string, size int64, blobPath string, kind cache.EntryKind, offset int64, zstd bool) (rc io.ReadCloser, foundSize int64, tryProxy bool, err error) {
 	locked := true
 	c.mu.Lock()
 
@@ -569,7 +574,11 @@ func (c *Cache) availableOrTryProxy(key string, size int64, blobPath string, kin
 				// Race condition, was the item purged after we released the lock?
 				log.Printf("Warning: expected %s to exist on disk, undersized cache?", blobPath)
 			} else if kind == cache.CAS {
-				rc, err = casblob.GetUncompressedReadCloser(f, size)
+				if zstd {
+					rc, err = casblob.GetZstdReadCloser(f, size, offset)
+				} else {
+					rc, err = casblob.GetUncompressedReadCloser(f, size, offset)
+				}
 				if err != nil {
 					log.Printf("Warning: expected item to be on disk, but something happened: %v", err)
 				} else {
@@ -584,6 +593,7 @@ func (c *Cache) availableOrTryProxy(key string, size int64, blobPath string, kin
 					log.Printf("Warning: expected %s to on disk to have size %d, found %d",
 						blobPath, size, foundSize)
 				} else {
+					f.Seek(offset, io.SeekStart)
 					return f, foundSize, false, nil
 				}
 			}
@@ -614,13 +624,25 @@ func (c *Cache) availableOrTryProxy(key string, size int64, blobPath string, kin
 	return nil, -1, tryProxy, err
 }
 
+var errOnlyCompressedCAS = errors.New("Only CAS blobs are available in compressed form")
+
 // Get returns an io.ReadCloser with the content of the cache item stored
 // under `hash` and the number of bytes that can be read from it. If the
 // item is not found, the io.ReadCloser will be nil. If some error occurred
 // when processing the request, then it is returned. Callers should provide
 // the `size` of the item to be retrieved, or -1 if unknown.
-func (c *Cache) Get(kind cache.EntryKind, hash string, size int64) (rc io.ReadCloser, s int64, rErr error) {
+func (c *Cache) Get(kind cache.EntryKind, hash string, size int64, offset int64) (rc io.ReadCloser, s int64, rErr error) {
+	return c.get(kind, hash, size, offset, false)
+}
 
+// GetZstd is just like Get, except the data available from rc is zstandard
+// compressed. Note that the returned `s` value still refers to the amount
+// of data once it has been decompressed.
+func (c *Cache) GetZstd(hash string, size int64, offset int64) (rc io.ReadCloser, s int64, rErr error) {
+	return c.get(cache.CAS, hash, size, offset, true)
+}
+
+func (c *Cache) get(kind cache.EntryKind, hash string, size int64, offset int64, zstd bool) (rc io.ReadCloser, s int64, rErr error) {
 	// The hash format is checked properly in the http/grpc code.
 	// Just perform a simple/fast check here, to catch bad tests.
 	if len(hash) != sha256HashStrSize {
@@ -630,7 +652,23 @@ func (c *Cache) Get(kind cache.EntryKind, hash string, size int64) (rc io.ReadCl
 
 	if kind == cache.CAS && size <= 0 && hash == emptySha256 {
 		cacheHits.Inc()
+
+		if zstd {
+			return ioutil.NopCloser(bytes.NewReader(emptyZstdBlob)), 0, nil
+		}
+
 		return ioutil.NopCloser(bytes.NewReader([]byte{})), 0, nil
+	}
+
+	if kind != cache.CAS && zstd {
+		return nil, -1, errOnlyCompressedCAS
+	}
+
+	if offset < 0 {
+		return nil, -1, fmt.Errorf("Invalid offset: %d", offset)
+	}
+	if size > 0 && offset >= size {
+		return nil, -1, fmt.Errorf("Invalid offset: %d for size %d", offset, size)
 	}
 
 	var err error
@@ -661,7 +699,7 @@ func (c *Cache) Get(kind cache.EntryKind, hash string, size int64) (rc io.ReadCl
 	}()
 
 	blobPath := cacheFilePath(kind, c.dir, hash)
-	f, foundSize, tryProxy, err := c.availableOrTryProxy(key, size, blobPath, kind)
+	f, foundSize, tryProxy, err := c.availableOrTryProxy(key, size, blobPath, kind, offset, zstd)
 	if err != nil {
 		return nil, -1, err
 	}
@@ -723,9 +761,17 @@ func (c *Cache) Get(kind cache.EntryKind, hash string, size int64) (rc io.ReadCl
 		return nil, -1, err
 	}
 	if kind != cache.CAS {
+		if offset > 0 {
+			rcf.Seek(offset, io.SeekStart)
+		}
 		rc = rcf
+	} else if zstd {
+		rc, err = casblob.GetZstdReadCloser(rcf, size, offset)
+		if err != nil {
+			return nil, -1, err
+		}
 	} else {
-		rc, err = casblob.GetUncompressedReadCloser(rcf, size)
+		rc, err = casblob.GetUncompressedReadCloser(rcf, size, offset)
 		if err != nil {
 			return nil, -1, err
 		}
@@ -822,7 +868,7 @@ func cacheFilePath(kind cache.EntryKind, cacheDir string, hash string) string {
 // an error.
 func (c *Cache) GetValidatedActionResult(hash string) (*pb.ActionResult, []byte, error) {
 
-	rc, sizeBytes, err := c.Get(cache.AC, hash, -1)
+	rc, sizeBytes, err := c.Get(cache.AC, hash, -1, 0)
 	if rc != nil {
 		defer rc.Close()
 	}
@@ -855,7 +901,7 @@ func (c *Cache) GetValidatedActionResult(hash string) (*pb.ActionResult, []byte,
 	}
 
 	for _, d := range result.OutputDirectories {
-		r, size, err := c.Get(cache.CAS, d.TreeDigest.Hash, d.TreeDigest.SizeBytes)
+		r, size, err := c.Get(cache.CAS, d.TreeDigest.Hash, d.TreeDigest.SizeBytes, 0)
 		if r == nil {
 			return nil, nil, err // aka "not found", or an err if non-nil
 		}
