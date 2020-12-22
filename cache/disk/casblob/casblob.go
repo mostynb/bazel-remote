@@ -13,6 +13,7 @@ import (
 	"os"
 
 	"github.com/klauspost/compress/zstd"
+	syncpool "github.com/mostynb/zstdpool-syncpool"
 )
 
 type CompressionType uint8
@@ -29,6 +30,9 @@ var decoder, _ = zstd.NewReader(nil) // TODO: raise WithDecoderConcurrency ?
 
 var singleDecoder = zstd.WithDecoderConcurrency(1)
 var singleEncoder = zstd.WithEncoderConcurrency(1)
+
+var encoderPool = syncpool.NewEncoderPool(zstdFastestLevel, singleEncoder)
+var decoderPool = syncpool.NewDecoderPool(singleDecoder)
 
 const defaultChunkSize = 1024 * 1024 * 1 // 1M
 
@@ -62,7 +66,7 @@ type readCloserWrapper struct {
 
 	rdr io.Reader // Read from this, not from decoder or file.
 
-	decoder *zstd.Decoder // Might be nil.
+	decoder *syncpool.DecoderWrapper // Might be nil.
 	file    *os.File
 }
 
@@ -187,7 +191,12 @@ func GetUncompressedReadCloser(f *os.File, expectedSize int64, offset int64) (io
 		f.Seek(h.chunkOffsets[chunkNum], io.SeekStart)
 	}
 	if remainder == 0 {
-		z, err := zstd.NewReader(f, singleDecoder) // TODO: use a pool, or a chunk decoder.
+		z, ok := decoderPool.Get().(*syncpool.DecoderWrapper)
+		if !ok {
+			f.Close()
+			return nil, err
+		}
+		err := z.Reset(f)
 		if err != nil {
 			f.Close()
 			return nil, err
@@ -221,10 +230,17 @@ func GetUncompressedReadCloser(f *os.File, expectedSize int64, offset int64) (io
 		return ioutil.NopCloser(r), nil
 	}
 
-	z, err := zstd.NewReader(f, singleDecoder) // TODO: use a pool.
+	z, ok := decoderPool.Get().(*syncpool.DecoderWrapper)
+	if !ok {
+		f.Close()
+		return nil, errors.New("Failed to get zstd decoder from pool")
+	}
+
+	err = z.Reset(f)
 	if err != nil {
 		f.Close()
-		return nil, err
+		decoderPool.Put(z)
+		return nil, fmt.Errorf("Failed to setup zstd decoder: %w", err)
 	}
 
 	br := bytes.NewReader(uncompressedFirstChunk[remainder:])

@@ -1070,3 +1070,10 @@ go_repository(
     sum = "h1:y7Vn4YH/rfUHOCwNhvkAcA0gMQvFdKzSE8Ri3qtcFlc=",
     version = "v1.10.1",
 )
+
+go_repository(
+    name = "com_github_mostynb_zstdpool_syncpool",
+    importpath = "github.com/mostynb/zstdpool-syncpool",
+    sum = "h1:8V2TSrHuDdvCfn4lU6bK73d7yapVOS1/o580bEoW0Dc=",
+    version = "v0.0.0-20201220234002-1948a0c54418",
+)
