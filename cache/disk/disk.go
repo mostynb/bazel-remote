@@ -773,7 +773,11 @@ func (c *diskCache) GetValidatedActionResult(ctx context.Context, hash string) (
 		return nil, nil, err
 	}
 
-	if rc == nil || sizeBytes <= 0 {
+	if rc == nil {
+		return nil, nil, nil // aka "not found"
+	}
+	if sizeBytes <= 0 {
+		c.accessLogger.Println("WARNING 1: ActionResult", hash, "has non-positive size", sizeBytes)
 		return nil, nil, nil // aka "not found"
 	}
 
@@ -807,6 +811,7 @@ func (c *diskCache) GetValidatedActionResult(ctx context.Context, hash string) (
 		// d was validated in validate.ActionResult but blobs were not checked for existence
 		r, size, err := c.Get(ctx, cache.CAS, d.TreeDigest.Hash, d.TreeDigest.SizeBytes, 0)
 		if r == nil {
+			c.accessLogger.Println("WARNING 2: ActionResult", hash, "has a missing CAS object in OutputDirectories", d.TreeDigest.Hash)
 			return nil, nil, err // aka "not found", or an err if non-nil
 		}
 		if err != nil {
@@ -857,6 +862,17 @@ func (c *diskCache) GetValidatedActionResult(ctx context.Context, hash string) (
 
 	err = c.findMissingCasBlobsInternal(ctx, pendingValidations, true)
 	if errors.Is(err, errMissingBlob) {
+		missingBlobFound := false
+		for _, blob := range pendingValidations {
+			if blob != nil {
+				c.accessLogger.Println("WARNING 3: ActionResult", hash, "has at least one missing CAS blob", blob.Hash)
+				missingBlobFound = true
+				break
+			}
+		}
+		if !missingBlobFound {
+			c.accessLogger.Println("WARNING 4: ActionResult", hash, "has missing blobs, but it's not clear which (internal bug)")
+		}
 		return nil, nil, nil // aka "not found"
 	}
 	if err != nil {
